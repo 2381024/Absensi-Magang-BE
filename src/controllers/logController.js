@@ -12,13 +12,17 @@ const startShift = async (req, res, next) => {
     const userId = req.user.id;
     const { latitude, longitude } = req.body;
 
-    const conflict = await pool.query(
-      `SELECT id FROM work_logs WHERE user_id = $1 AND date = CURRENT_DATE AND status = 'active'`,
+    const todayLog = await pool.query(
+      `SELECT id, status FROM work_logs WHERE user_id = $1 AND date = CURRENT_DATE`,
       [userId]
     );
-    if (conflict.rows.length > 0) {
+    if (todayLog.rows.length > 0) {
+      const existing = todayLog.rows[0];
+      const message = existing.status === 'active'
+        ? "Shift hari ini sudah aktif"
+        : "Shift hari ini sudah selesai";
       return res.status(409).json({
-        error: { message: "Shift hari ini sudah aktif", status: 409 },
+        error: { message, status: 409 },
       });
     }
 
@@ -92,6 +96,14 @@ const finishShift = async (req, res, next) => {
     }
     if (log.status !== "active") {
       return res.status(409).json({ error: { message: "Shift sudah selesai atau tidak aktif", status: 409 } });
+    }
+
+    if (log.geofence_passed === true) {
+      if (end_latitude === undefined || end_longitude === undefined) {
+        return res.status(400).json({
+          error: { message: "Latitude dan longitude wajib karena geofence aktif saat shift dimulai", status: 400 },
+        });
+      }
     }
 
     const startTime = new Date(log.start_time);

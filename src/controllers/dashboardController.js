@@ -24,7 +24,7 @@ const getStats = async (req, res, next) => {
         "SELECT COALESCE(SUM(total_work_minutes), 0) AS total_work_minutes_today FROM work_logs WHERE date = CURRENT_DATE AND status = 'completed'",
       ),
       pool.query(
-        "SELECT COUNT(*) AS users_on_leave_today FROM users WHERE is_active = false",
+        "SELECT COUNT(*) AS users_on_leave_today FROM users WHERE is_active = true AND id NOT IN (SELECT user_id FROM work_logs WHERE date = CURRENT_DATE)",
       ),
     ]);
 
