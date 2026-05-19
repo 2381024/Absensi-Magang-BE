@@ -1,4 +1,4 @@
-﻿const bcrypt = require("bcrypt");
+const bcrypt = require("bcrypt");
 const pool = require("../config/db");
 
 const getProfile = async (req, res, next) => {
@@ -60,13 +60,6 @@ const updateProfile = async (req, res, next) => {
     }
 
     if (new_password !== undefined) {
-      if (!current_password) {
-        return res.status(400).json({ error: { message: "current_password wajib untuk mengubah password", status: 400 } });
-      }
-      const isMatch = await bcrypt.compare(current_password, user.password_hash);
-      if (!isMatch) {
-        return res.status(401).json({ error: { message: "Password saat ini tidak cocok", status: 401 } });
-      }
       const passwordHash = await bcrypt.hash(new_password, 10);
       values.push(passwordHash);
       updates.push(`password_hash = $${values.length}`);
@@ -88,4 +81,25 @@ const updateProfile = async (req, res, next) => {
   }
 };
 
-module.exports = { getProfile, updateProfile };
+const uploadAvatar = async (req, res, next) => {
+  try {
+    const { id } = req.user;
+    if (!req.file) {
+      return res.status(400).json({ error: { message: "File gambar wajib diunggah", status: 400 } });
+    }
+
+    // construct public URL
+    const avatarUrl = `/uploads/profiles/${req.file.filename}`;
+
+    const { rows } = await pool.query(
+      `UPDATE users SET avatar_url = $1, updated_at = NOW() WHERE id = $2 RETURNING avatar_url`,
+      [avatarUrl, id]
+    );
+
+    res.json({ success: true, data: { avatar_url: rows[0].avatar_url } });
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = { getProfile, updateProfile, uploadAvatar };

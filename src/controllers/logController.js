@@ -1,16 +1,27 @@
-﻿const pool = require("../config/db");
+const pool = require("../config/db");
 const { getDistanceMeters } = require("../utils/haversine");
 
-const calculateMinutes = (start, end, breakMinutes) => {
+const calculateMinutes = (start, end) => {
   const diff = Math.max(0, end.getTime() - start.getTime());
-  const total = Math.round(diff / 60000) - Number(breakMinutes || 0);
-  return total >= 0 ? total : 0;
+  return Math.round(diff / 60000);
+};
+
+// Helper: get today's day of week (0=Sunday, 6=Saturday)
+const getTodayDayOfWeek = () => new Date().getDay();
+
+// Helper: parse a TIME string (HH:MM:SS or HH:MM) into today's Date for comparison
+const timeToTodayDate = (timeStr) => {
+  if (!timeStr) return null;
+  const parts = timeStr.split(":");
+  const d = new Date();
+  d.setHours(Number(parts[0]), Number(parts[1]), parts[2] ? Number(parts[2]) : 0, 0);
+  return d;
 };
 
 const startShift = async (req, res, next) => {
   try {
     const userId = req.user.id;
-    const { latitude, longitude } = req.body;
+    const { latitude, longitude, late_reason } = req.body;
 
     const todayLog = await pool.query(
       `SELECT id, status FROM work_logs WHERE user_id = $1 AND date = CURRENT_DATE`,
@@ -26,13 +37,37 @@ const startShift = async (req, res, next) => {
       });
     }
 
-    const configResult = await pool.query(
-      `SELECT value FROM system_config WHERE key = 'break_minutes_default'`
+    // Look up today's schedule
+    const dayOfWeek = getTodayDayOfWeek();
+    const scheduleResult = await pool.query(
+      `SELECT start_time, end_time FROM user_schedules WHERE user_id = $1 AND day_of_week = $2`,
+      [userId, dayOfWeek]
     );
-    const breakMinutes = configResult.rows[0]
-      ? Number(configResult.rows[0].value)
-      : 30;
+    const schedule = scheduleResult.rows[0] || null;
 
+    let scheduledStart = null;
+    let scheduledEnd = null;
+    let isLate = false;
+
+    if (schedule) {
+      scheduledStart = schedule.start_time;
+      scheduledEnd = schedule.end_time;
+
+      const schedStartDate = timeToTodayDate(scheduledStart);
+      const now = new Date();
+
+      if (now > schedStartDate) {
+        isLate = true;
+        // Require late reason
+        if (!late_reason || !late_reason.trim()) {
+          return res.status(400).json({
+            error: { message: "Alasan terlambat wajib diisi", status: 400 },
+          });
+        }
+      }
+    }
+
+    // Geofence check
     const geofenceResult = await pool.query(
       `SELECT id, latitude, longitude, radius_meters FROM geofence_locations WHERE is_active = true`);
     let geofencePassed = null;
@@ -68,10 +103,12 @@ const startShift = async (req, res, next) => {
     }
 
     const { rows } = await pool.query(
-      `INSERT INTO work_logs (user_id, date, start_time, break_minutes, geofence_passed, start_lat, start_lng)
-       VALUES ($1, CURRENT_DATE, NOW(), $2, $3, $4, $5)
-       RETURNING id, date, start_time, status, geofence_passed, break_minutes`,
-      [userId, breakMinutes, geofencePassed, startLat, startLng]
+      `INSERT INTO work_logs (user_id, date, start_time, geofence_passed, start_lat, start_lng,
+                              scheduled_start, scheduled_end, is_late, late_reason)
+       VALUES ($1, CURRENT_DATE, NOW(), $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id, date, start_time, status, geofence_passed, scheduled_start, scheduled_end, is_late, late_reason`,
+      [userId, geofencePassed, startLat, startLng,
+       scheduledStart, scheduledEnd, isLate, isLate ? late_reason.trim() : null]
     );
 
     res.status(201).json({ success: true, data: rows[0] });
@@ -84,7 +121,7 @@ const finishShift = async (req, res, next) => {
   try {
     const userId = req.user.id;
     const { id } = req.params;
-    const { description, end_latitude, end_longitude } = req.body;
+    const { description, end_latitude, end_longitude, early_leave_reason } = req.body;
 
     const { rows } = await pool.query(
       `SELECT * FROM work_logs WHERE id = $1 AND user_id = $2`,
@@ -106,17 +143,44 @@ const finishShift = async (req, res, next) => {
       }
     }
 
-    const startTime = new Date(log.start_time);
+    // Check for early leave
+    let isEarlyLeave = false;
+    if (log.scheduled_end) {
+      const schedEndDate = timeToTodayDate(log.scheduled_end);
+      const now = new Date();
+      if (now < schedEndDate) {
+        isEarlyLeave = true;
+        if (!early_leave_reason || !early_leave_reason.trim()) {
+          return res.status(400).json({
+            error: { message: "Alasan pulang cepat wajib diisi", status: 400 },
+          });
+        }
+      }
+    }
+
+    // Calculate total work minutes
     const endTime = new Date();
-    const totalMinutes = calculateMinutes(startTime, endTime, log.break_minutes);
+    let totalMinutes;
+
+    if (log.scheduled_start && !log.is_late) {
+      // On time: count from scheduled start
+      const schedStartDate = timeToTodayDate(log.scheduled_start);
+      totalMinutes = calculateMinutes(schedStartDate, endTime);
+    } else {
+      // Late or No schedule: count from actual start
+      const startTime = new Date(log.start_time);
+      totalMinutes = calculateMinutes(startTime, endTime);
+    }
 
     const updated = await pool.query(
       `UPDATE work_logs
        SET end_time = NOW(), description = $1, status = 'completed', total_work_minutes = $2,
-           end_lat = $3, end_lng = $4, updated_at = NOW()
-       WHERE id = $5
-       RETURNING id, date, start_time, end_time, break_minutes, total_work_minutes, status, description, geofence_passed`,
-      [description || log.description, totalMinutes, end_latitude, end_longitude, id]
+           end_lat = $3, end_lng = $4, is_early_leave = $5, early_leave_reason = $6, updated_at = NOW()
+       WHERE id = $7
+       RETURNING id, date, start_time, end_time, total_work_minutes, status, description, geofence_passed,
+                 scheduled_start, scheduled_end, is_late, late_reason, is_early_leave, early_leave_reason`,
+      [description || log.description, totalMinutes, end_latitude, end_longitude,
+       isEarlyLeave, isEarlyLeave ? early_leave_reason.trim() : null, id]
     );
 
     res.json({ success: true, data: updated.rows[0] });
@@ -129,7 +193,8 @@ const getTodayLog = async (req, res, next) => {
   try {
     const userId = req.user.id;
     const { rows } = await pool.query(
-      `SELECT id, date, start_time, end_time, break_minutes, total_work_minutes, status, geofence_passed
+      `SELECT id, date, start_time, end_time, total_work_minutes, status, geofence_passed,
+              scheduled_start, scheduled_end, is_late, late_reason, is_early_leave, early_leave_reason
        FROM work_logs
        WHERE user_id = $1 AND date = CURRENT_DATE
        ORDER BY created_at DESC
@@ -153,7 +218,8 @@ const getLogs = async (req, res, next) => {
     }
 
     const { rows } = await pool.query(
-      `SELECT id, date, start_time, end_time, break_minutes, total_work_minutes, description, status, geofence_passed
+      `SELECT id, date, start_time, end_time, total_work_minutes, description, status, geofence_passed,
+              scheduled_start, scheduled_end, is_late, late_reason, is_early_leave, early_leave_reason
        FROM work_logs
        WHERE user_id = $1 AND EXTRACT(MONTH FROM date) = $2 AND EXTRACT(YEAR FROM date) = $3
        ORDER BY date DESC`,
@@ -177,7 +243,8 @@ const getLogSummary = async (req, res, next) => {
     }
 
     const logsResult = await pool.query(
-      `SELECT id, date, start_time, end_time, break_minutes, total_work_minutes, description, status, geofence_passed
+      `SELECT id, date, start_time, end_time, total_work_minutes, description, status, geofence_passed,
+              scheduled_start, scheduled_end, is_late, late_reason, is_early_leave, early_leave_reason
        FROM work_logs
        WHERE user_id = $1 AND EXTRACT(MONTH FROM date) = $2 AND EXTRACT(YEAR FROM date) = $3
        ORDER BY date DESC`,
@@ -185,7 +252,9 @@ const getLogSummary = async (req, res, next) => {
     );
 
     const summaryResult = await pool.query(
-      `SELECT COUNT(*) AS total_days, COALESCE(SUM(total_work_minutes), 0) AS total_work_minutes
+      `SELECT COUNT(*) AS total_days, COALESCE(SUM(total_work_minutes), 0) AS total_work_minutes,
+              COUNT(*) FILTER (WHERE is_late = true) AS total_late,
+              COUNT(*) FILTER (WHERE is_early_leave = true) AS total_early_leave
        FROM work_logs
        WHERE user_id = $1 AND EXTRACT(MONTH FROM date) = $2 AND EXTRACT(YEAR FROM date) = $3`,
       [userId, Number(month), Number(year)]
@@ -202,6 +271,8 @@ const getLogSummary = async (req, res, next) => {
         total_work_minutes: totalWorkMinutes,
         total_work_hours: Number((totalWorkMinutes / 60).toFixed(2)),
         average_hours_per_day: averageHoursPerDay,
+        total_late: Number(summaryResult.rows[0].total_late),
+        total_early_leave: Number(summaryResult.rows[0].total_early_leave),
         logs: logsResult.rows,
       },
     });
@@ -214,8 +285,10 @@ const getLogById = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { rows } = await pool.query(
-      `SELECT wl.id, wl.date, wl.start_time, wl.end_time, wl.break_minutes, wl.total_work_minutes,
+      `SELECT wl.id, wl.date, wl.start_time, wl.end_time, wl.total_work_minutes,
               wl.description, wl.status, wl.geofence_passed,
+              wl.scheduled_start, wl.scheduled_end, wl.is_late, wl.late_reason,
+              wl.is_early_leave, wl.early_leave_reason,
               json_build_object('id', u.id, 'full_name', u.full_name) AS user
        FROM work_logs wl
        JOIN users u ON u.id = wl.user_id
@@ -264,7 +337,8 @@ const getAllLogs = async (req, res, next) => {
       conditions.push(`status = $${values.length}`);
     }
 
-    const query = `SELECT id, user_id, date, start_time, end_time, break_minutes, total_work_minutes, description, status, geofence_passed
+    const query = `SELECT id, user_id, date, start_time, end_time, total_work_minutes, description, status, geofence_passed,
+                          scheduled_start, scheduled_end, is_late, late_reason, is_early_leave, early_leave_reason
                    FROM work_logs
                    WHERE ${conditions.join(" AND ")}
                    ORDER BY date DESC, start_time DESC`;
@@ -310,7 +384,15 @@ const adminUpdateLog = async (req, res, next) => {
     const mergedEnd = end_time ? new Date(end_time) : log.end_time ? new Date(log.end_time) : null;
     let totalWorkMinutes = log.total_work_minutes;
     if (mergedEnd) {
-      totalWorkMinutes = calculateMinutes(mergedStart, mergedEnd, log.break_minutes);
+      // Recalculate: if scheduled_start exists, use it
+      if (log.scheduled_start && !log.is_late) {
+        const schedStart = timeToTodayDate(log.scheduled_start);
+        // Adjust schedStart to the log's date
+        schedStart.setFullYear(mergedEnd.getFullYear(), mergedEnd.getMonth(), mergedEnd.getDate());
+        totalWorkMinutes = calculateMinutes(schedStart, mergedEnd);
+      } else {
+        totalWorkMinutes = calculateMinutes(mergedStart, mergedEnd);
+      }
       fields.push(`total_work_minutes = $${values.length + 1}`);
       values.push(totalWorkMinutes);
     }
@@ -322,36 +404,6 @@ const adminUpdateLog = async (req, res, next) => {
     );
 
     res.json({ success: true, data: updated.rows[0] });
-  } catch (err) {
-    next(err);
-  }
-};
-
-const patchLogBreak = async (req, res, next) => {
-  try {
-    const { id } = req.params;
-    const { break_minutes } = req.body;
-    if (break_minutes === undefined) {
-      return res.status(400).json({ error: { message: "Field break_minutes wajib", status: 400 } });
-    }
-
-    const { rows } = await pool.query(`SELECT * FROM work_logs WHERE id = $1`, [id]);
-    const log = rows[0];
-    if (!log) {
-      return res.status(404).json({ error: { message: "Log tidak ditemukan", status: 404 } });
-    }
-
-    let totalMinutes = log.total_work_minutes;
-    if (log.end_time) {
-      totalMinutes = calculateMinutes(new Date(log.start_time), new Date(log.end_time), break_minutes);
-    }
-
-    const { rows: updatedRows } = await pool.query(
-      `UPDATE work_logs SET break_minutes = $1, total_work_minutes = $2, updated_at = NOW() WHERE id = $3 RETURNING *`,
-      [break_minutes, totalMinutes, id]
-    );
-
-    res.json({ success: true, data: updatedRows[0] });
   } catch (err) {
     next(err);
   }
@@ -433,7 +485,6 @@ module.exports = {
   getLogById,
   getAllLogs,
   adminUpdateLog,
-  patchLogBreak,
   deleteLog,
   addLogEntry,
   getLogEntries,

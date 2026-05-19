@@ -1,4 +1,4 @@
-﻿const bcrypt = require("bcrypt");
+const bcrypt = require("bcrypt");
 const pool = require("../config/db");
 
 const getAllUsers = async (req, res, next) => {
@@ -155,4 +155,36 @@ const deleteUser = async (req, res, next) => {
   }
 };
 
-module.exports = { getAllUsers, getUserById, createUser, updateUser, deleteUser };
+const uploadUserAvatar = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    if (!req.file) {
+      return res.status(400).json({ error: { message: "File gambar wajib diunggah", status: 400 } });
+    }
+
+    // construct public URL
+    const avatarUrl = `/uploads/profiles/${req.file.filename}`;
+
+    const { rows } = await pool.query(
+      `UPDATE users SET avatar_url = $1, updated_at = NOW() WHERE id = $2 RETURNING avatar_url`,
+      [avatarUrl, id]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({ error: { message: "User tidak ditemukan", status: 404 } });
+    }
+
+    res.json({ success: true, data: { avatar_url: rows[0].avatar_url } });
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = {
+  getAllUsers,
+  getUserById,
+  createUser,
+  updateUser,
+  deleteUser,
+  uploadUserAvatar,
+};

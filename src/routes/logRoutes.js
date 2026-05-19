@@ -1,4 +1,4 @@
-﻿const express = require("express");
+const express = require("express");
 const router = express.Router();
 const authMiddleware = require("../middleware/authMiddleware");
 const adminMiddleware = require("../middleware/adminMiddleware");
@@ -11,7 +11,6 @@ const {
   getLogById,
   getAllLogs,
   adminUpdateLog,
-  patchLogBreak,
   deleteLog,
   addLogEntry,
   getLogEntries,
@@ -25,7 +24,6 @@ router.get("/summary", authMiddleware, getLogSummary);
 router.get("/all", authMiddleware, adminMiddleware, getAllLogs);
 router.get("/:id", authMiddleware, getLogById);
 router.put("/:id", authMiddleware, adminMiddleware, adminUpdateLog);
-router.patch("/:id/break", authMiddleware, adminMiddleware, patchLogBreak);
 router.delete("/:id", authMiddleware, adminMiddleware, deleteLog);
 router.post("/:id/entries", authMiddleware, addLogEntry);
 router.get("/:id/entries", authMiddleware, getLogEntries);

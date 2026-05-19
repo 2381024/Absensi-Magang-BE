@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const path = require("path");
 require("dotenv").config();
 
 const healthRoutes = require("./src/routes/healthRoutes");
@@ -10,6 +11,7 @@ const geofenceRoutes = require("./src/routes/geofenceRoutes");
 const logRoutes = require("./src/routes/logRoutes");
 const dashboardRoutes = require("./src/routes/dashboardRoutes");
 const configRoutes = require("./src/routes/configRoutes");
+const scheduleRoutes = require("./src/routes/scheduleRoutes");
 const errorHandler = require("./src/middleware/errorHandler");
 
 const app = express();
@@ -17,6 +19,9 @@ const PORT = process.env.PORT || 5000;
 
 app.use(cors());
 app.use(express.json());
+
+// Serve static uploads folder
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 // Routes
 app.use("/api/auth", authRoutes);
@@ -26,6 +31,7 @@ app.use("/api/geofence", geofenceRoutes);
 app.use("/api/logs", logRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/config", configRoutes);
+app.use("/api/schedules", scheduleRoutes);
 app.use("/api/health", healthRoutes);
 
 // Error handler

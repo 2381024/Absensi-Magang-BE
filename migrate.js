@@ -14,12 +14,18 @@ async function run() {
     await client.query(migrationSql);
     console.log("✅ Migration completed — all tables created.");
 
-    // 2. Hash passwords
+    // 2. Run migration v2 SQL
+    console.log("🔄 Running migration v2...");
+    const migrationV2Sql = fs.readFileSync(path.join(__dirname, "migration_v2.sql"), "utf8");
+    await client.query(migrationV2Sql);
+    console.log("✅ Migration v2 completed — schedules & attendance columns added.");
+
+    // 3. Hash passwords
     const rounds = 10;
     const adminHash = await bcrypt.hash("admin123", rounds);
     const userHash = await bcrypt.hash("user123", rounds);
 
-    // 3. Seed users
+    // 4. Seed users
     console.log("🌱 Seeding users...");
 
     await client.query(

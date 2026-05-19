@@ -1,4 +1,4 @@
-﻿const express = require("express");
+const express = require("express");
 const router = express.Router();
 const {
   getAllUsers,
@@ -6,15 +6,18 @@ const {
   createUser,
   updateUser,
   deleteUser,
+  uploadUserAvatar,
 } = require("../controllers/userController");
 const authMiddleware = require("../middleware/authMiddleware");
 const adminMiddleware = require("../middleware/adminMiddleware");
+const { uploadProfilePicture } = require("../middleware/uploadMiddleware");
 
 router.use(authMiddleware, adminMiddleware);
 router.get("/", getAllUsers);
 router.get("/:id", getUserById);
 router.post("/", createUser);
 router.put("/:id", updateUser);
+router.post("/:id/avatar", uploadProfilePicture.single("avatar"), uploadUserAvatar);
 router.delete("/:id", deleteUser);
 
 module.exports = router;
