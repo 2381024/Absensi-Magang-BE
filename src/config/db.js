@@ -8,4 +8,10 @@ const pool = new Pool({
   database: process.env.DB_NAME,
 });
 
+// Ensure every connection uses the correct timezone
+pool.on("connect", (client) => {
+  const tz = process.env.APP_TIMEZONE || "Asia/Jakarta";
+  client.query(`SET timezone = '${tz}'`);
+});
+
 module.exports = pool;

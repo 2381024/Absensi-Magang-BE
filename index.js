@@ -1,7 +1,12 @@
+require("dotenv").config();
+
+// Force process timezone to Asia/Jakarta (WIB) so new Date() is always WIB,
+// regardless of server system timezone.
+process.env.TZ = process.env.APP_TIMEZONE || "Asia/Jakarta";
+
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
-require("dotenv").config();
 
 const healthRoutes = require("./src/routes/healthRoutes");
 const authRoutes = require("./src/routes/authRoutes");
@@ -37,6 +42,6 @@ app.use("/api/health", healthRoutes);
 // Error handler
 app.use(errorHandler);
 
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
 });
