@@ -1,4 +1,8 @@
-const { Pool } = require("pg");
+const { Pool, types } = require("pg");
+
+// Override default DATE parser (OID 1082).
+// Prevent pg from converting DATE into a local Date object, which causes timezone shifts when stringified.
+types.setTypeParser(1082, (val) => val);
 
 const pool = new Pool({
   user: process.env.DB_USER,
