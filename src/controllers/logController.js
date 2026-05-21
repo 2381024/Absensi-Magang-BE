@@ -24,13 +24,16 @@ const startShift = async (req, res, next) => {
     const { latitude, longitude, late_reason } = req.body;
 
     const todayLog = await pool.query(
-      `SELECT id, status FROM work_logs WHERE user_id = $1 AND date = CURRENT_DATE`,
+      `SELECT id, status, date FROM work_logs 
+       WHERE user_id = $1 AND (status = 'active' OR date = CURRENT_DATE)
+       ORDER BY status ASC
+       LIMIT 1`,
       [userId]
     );
     if (todayLog.rows.length > 0) {
       const existing = todayLog.rows[0];
       const message = existing.status === 'active'
-        ? "Shift hari ini sudah aktif"
+        ? "Anda masih memiliki shift yang sedang aktif"
         : "Shift hari ini sudah selesai";
       return res.status(409).json({
         error: { message, status: 409 },
@@ -196,8 +199,8 @@ const getTodayLog = async (req, res, next) => {
       `SELECT id, date, start_time, end_time, total_work_minutes, status, geofence_passed,
               scheduled_start, scheduled_end, is_late, late_reason, is_early_leave, early_leave_reason
        FROM work_logs
-       WHERE user_id = $1 AND date = CURRENT_DATE
-       ORDER BY created_at DESC
+       WHERE user_id = $1 AND (status = 'active' OR date = CURRENT_DATE)
+       ORDER BY status ASC, created_at DESC
        LIMIT 1`,
       [userId]
     );
@@ -381,9 +384,15 @@ const adminUpdateLog = async (req, res, next) => {
     }
 
     const mergedStart = start_time ? new Date(start_time) : new Date(log.start_time);
-    const mergedEnd = end_time ? new Date(end_time) : log.end_time ? new Date(log.end_time) : null;
-    let totalWorkMinutes = log.total_work_minutes;
-    if (mergedEnd) {
+    const mergedEnd = end_time !== undefined ? (end_time ? new Date(end_time) : null) : (log.end_time ? new Date(log.end_time) : null);
+
+    if (end_time === null) {
+      fields.push(`status = 'active'`);
+      fields.push(`total_work_minutes = NULL`);
+      fields.push(`is_early_leave = NULL`);
+      fields.push(`early_leave_reason = NULL`);
+    } else if (mergedEnd) {
+      let totalWorkMinutes = log.total_work_minutes;
       // Recalculate: if scheduled_start exists, use it
       if (log.scheduled_start && !log.is_late) {
         const schedStart = timeToTodayDate(log.scheduled_start);
@@ -393,8 +402,9 @@ const adminUpdateLog = async (req, res, next) => {
       } else {
         totalWorkMinutes = calculateMinutes(mergedStart, mergedEnd);
       }
-      fields.push(`total_work_minutes = $${values.length + 1}`);
       values.push(totalWorkMinutes);
+      fields.push(`total_work_minutes = $${values.length}`);
+      fields.push(`status = 'completed'`);
     }
 
     values.push(id);
@@ -476,6 +486,35 @@ const getLogEntries = async (req, res, next) => {
   }
 };
 
+const deleteLogEntry = async (req, res, next) => {
+  try {
+    const { entryId } = req.params;
+
+    const { rows: entries } = await pool.query(
+      `SELECT e.id, l.user_id 
+       FROM work_log_entries e
+       JOIN work_logs l ON e.work_log_id = l.id
+       WHERE e.id = $1`,
+      [entryId]
+    );
+
+    if (entries.length === 0) {
+      return res.status(404).json({ error: { message: "Catatan tidak ditemukan", status: 404 } });
+    }
+
+    const logOwnerId = entries[0].user_id;
+    if (req.user.role !== "admin" && req.user.id !== logOwnerId) {
+      return res.status(403).json({ error: { message: "Akses ditolak", status: 403 } });
+    }
+
+    await pool.query(`DELETE FROM work_log_entries WHERE id = $1`, [entryId]);
+
+    res.json({ success: true, message: "Catatan berhasil dihapus" });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   startShift,
   finishShift,
@@ -488,4 +527,5 @@ module.exports = {
   deleteLog,
   addLogEntry,
   getLogEntries,
+  deleteLogEntry,
 };

@@ -14,6 +14,7 @@ const {
   deleteLog,
   addLogEntry,
   getLogEntries,
+  deleteLogEntry,
 } = require("../controllers/logController");
 
 router.post("/start", authMiddleware, startShift);
@@ -27,5 +28,6 @@ router.put("/:id", authMiddleware, adminMiddleware, adminUpdateLog);
 router.delete("/:id", authMiddleware, adminMiddleware, deleteLog);
 router.post("/:id/entries", authMiddleware, addLogEntry);
 router.get("/:id/entries", authMiddleware, getLogEntries);
+router.delete("/entries/:entryId", authMiddleware, deleteLogEntry);
 
 module.exports = router;
