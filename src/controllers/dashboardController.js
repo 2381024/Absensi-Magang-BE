@@ -2,68 +2,51 @@ const pool = require("../config/db");
 
 const getStats = async (req, res, next) => {
   try {
-    const [
-      totalUsersResult,
-      activeUsersResult,
-      activeShiftsResult,
-      completedShiftsResult,
-      totalWorkMinutesResult,
-      usersOnLeaveResult,
-      lateResult,
-      earlyLeaveResult,
-    ] = await Promise.all([
-      pool.query("SELECT COUNT(*) AS total_users FROM users WHERE role = 'user'"),
-      pool.query(
-        "SELECT COUNT(*) AS active_users FROM users WHERE is_active = true AND role = 'user'",
-      ),
-      pool.query(
-        "SELECT COUNT(*) AS active_shifts_today FROM work_logs WHERE date = CURRENT_DATE AND status = 'active'",
-      ),
-      pool.query(
-        "SELECT COUNT(*) AS completed_shifts_today FROM work_logs WHERE date = CURRENT_DATE AND status = 'completed'",
-      ),
-      pool.query(
-        "SELECT COALESCE(SUM(total_work_minutes), 0) AS total_work_minutes_today FROM work_logs WHERE date = CURRENT_DATE AND status = 'completed'",
-      ),
-      pool.query(
-        "SELECT COUNT(*) AS users_on_leave_today FROM users WHERE is_active = true AND role = 'user' AND id NOT IN (SELECT user_id FROM work_logs WHERE date = CURRENT_DATE)",
-      ),
-      pool.query(
-        "SELECT COUNT(*) AS late_today FROM work_logs WHERE date = CURRENT_DATE AND is_late = true",
-      ),
-      pool.query(
-        "SELECT COUNT(*) AS early_leave_today FROM work_logs WHERE date = CURRENT_DATE AND is_early_leave = true",
-      ),
-    ]);
+    // Single optimized query replacing 8 separate round-trips
+    const { rows } = await pool.query(`
+      WITH
+        today_logs AS (
+          SELECT status, is_late, is_early_leave, total_work_minutes
+          FROM work_logs
+          WHERE date = CURRENT_DATE
+        ),
+        active_users AS (
+          SELECT id FROM users
+          WHERE is_active = true AND role = 'user'
+        ),
+        scheduled_users_today AS (
+          SELECT user_id
+          FROM user_schedules
+          WHERE day_of_week = EXTRACT(DOW FROM CURRENT_DATE)::integer
+        )
+      SELECT
+        (SELECT COUNT(*) FROM users WHERE role = 'user') AS total_users,
+        (SELECT COUNT(*) FROM active_users) AS active_users,
+        (SELECT COUNT(*) FROM today_logs WHERE status = 'active') AS active_shifts_today,
+        (SELECT COUNT(*) FROM today_logs WHERE status = 'completed') AS completed_shifts_today,
+        (SELECT COALESCE(SUM(total_work_minutes), 0) FROM today_logs WHERE status = 'completed') AS total_work_minutes_today,
+        (SELECT COUNT(*) FROM active_users
+         WHERE id NOT IN (SELECT user_id FROM today_logs)
+           AND id IN (SELECT user_id FROM scheduled_users_today)
+        ) AS users_on_leave_today,
+        (SELECT COUNT(*) FROM today_logs WHERE is_late = true) AS late_today,
+        (SELECT COUNT(*) FROM today_logs WHERE is_early_leave = true) AS early_leave_today
+    `);
 
-    const totalUsers = Number(totalUsersResult.rows[0].total_users || 0);
-    const activeUsers = Number(activeUsersResult.rows[0].active_users || 0);
-    const activeShiftsToday = Number(
-      activeShiftsResult.rows[0].active_shifts_today || 0,
-    );
-    const completedShiftsToday = Number(
-      completedShiftsResult.rows[0].completed_shifts_today || 0,
-    );
-    const totalWorkMinutesToday = Number(
-      totalWorkMinutesResult.rows[0].total_work_minutes_today || 0,
-    );
-    const usersOnLeaveToday = Number(
-      usersOnLeaveResult.rows[0].users_on_leave_today || 0,
-    );
-    const lateToday = Number(lateResult.rows[0].late_today || 0);
-    const earlyLeaveToday = Number(earlyLeaveResult.rows[0].early_leave_today || 0);
+    const stats = rows[0];
+    const totalWorkMinutesToday = Number(stats.total_work_minutes_today || 0);
 
     res.json({
       success: true,
       data: {
-        total_users: totalUsers,
-        active_users: activeUsers,
-        active_shifts_today: activeShiftsToday,
-        completed_shifts_today: completedShiftsToday,
+        total_users: Number(stats.total_users || 0),
+        active_users: Number(stats.active_users || 0),
+        active_shifts_today: Number(stats.active_shifts_today || 0),
+        completed_shifts_today: Number(stats.completed_shifts_today || 0),
         total_work_hours_today: Number((totalWorkMinutesToday / 60).toFixed(2)),
-        users_on_leave_today: usersOnLeaveToday,
-        late_today: lateToday,
-        early_leave_today: earlyLeaveToday,
+        users_on_leave_today: Number(stats.users_on_leave_today || 0),
+        late_today: Number(stats.late_today || 0),
+        early_leave_today: Number(stats.early_leave_today || 0),
       },
     });
   } catch (err) {

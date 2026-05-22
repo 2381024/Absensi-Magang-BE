@@ -18,13 +18,52 @@ const timeToTodayDate = (timeStr) => {
   return d;
 };
 
+// Helper: combine a DATE string (YYYY-MM-DD) with a TIME string (HH:MM:SS) into a Date
+// Uses the server's local timezone (Asia/Jakarta via process.env.TZ)
+const dateTimeFromDateAndTime = (dateStr, timeStr) => {
+  if (!dateStr || !timeStr) return null;
+  const [year, month, day] = dateStr.split("-").map(Number);
+  const timeParts = String(timeStr).split(":");
+  return new Date(year, month - 1, day, Number(timeParts[0]), Number(timeParts[1]), timeParts[2] ? Number(timeParts[2]) : 0, 0);
+};
+
+// Helper: determine if scheduled end crosses midnight (e.g., shift 22:00 — 06:00)
+const isCrossMidnight = (scheduledStart, scheduledEnd) => {
+  if (!scheduledStart || !scheduledEnd) return false;
+  const startParts = String(scheduledStart).split(":");
+  const endParts = String(scheduledEnd).split(":");
+  const startMinutes = Number(startParts[0]) * 60 + Number(startParts[1]);
+  const endMinutes = Number(endParts[0]) * 60 + Number(endParts[1]);
+  return endMinutes <= startMinutes;
+};
+
+// Helper: get scheduled start/end as Date objects anchored to the log's date.
+// Handles cross-midnight shifts where scheduled_end is the next day.
+const getScheduledDateTimes = (logDate, scheduledStart, scheduledEnd) => {
+  if (!logDate || !scheduledStart) return { schedStart: null, schedEnd: null };
+  const schedStart = dateTimeFromDateAndTime(logDate, String(scheduledStart));
+  let schedEnd = null;
+  if (scheduledEnd) {
+    if (isCrossMidnight(scheduledStart, scheduledEnd)) {
+      // End time is on the next day
+      const [year, month, day] = logDate.split("-").map(Number);
+      const nextDay = new Date(year, month - 1, day + 1);
+      const nextDayStr = `${nextDay.getFullYear()}-${String(nextDay.getMonth() + 1).padStart(2, "0")}-${String(nextDay.getDate()).padStart(2, "0")}`;
+      schedEnd = dateTimeFromDateAndTime(nextDayStr, String(scheduledEnd));
+    } else {
+      schedEnd = dateTimeFromDateAndTime(logDate, String(scheduledEnd));
+    }
+  }
+  return { schedStart, schedEnd };
+};
+
 const startShift = async (req, res, next) => {
   try {
     const userId = req.user.id;
     const { latitude, longitude, late_reason } = req.body;
 
     const todayLog = await pool.query(
-      `SELECT id, status, date FROM work_logs 
+      `SELECT id, status, date FROM work_logs
        WHERE user_id = $1 AND (status = 'active' OR date = CURRENT_DATE)
        ORDER BY status ASC
        LIMIT 1`,
@@ -116,44 +155,57 @@ const startShift = async (req, res, next) => {
 
     res.status(201).json({ success: true, data: rows[0] });
   } catch (err) {
+    // Handle UNIQUE constraint violation from concurrent start requests
+    if (err.code === "23505") {
+      return res.status(409).json({
+        error: { message: "Shift hari ini sudah ada", status: 409 },
+      });
+    }
     next(err);
   }
 };
 
 const finishShift = async (req, res, next) => {
+  const client = await pool.connect();
   try {
+    await client.query("BEGIN");
+
     const userId = req.user.id;
     const { id } = req.params;
     const { description, end_latitude, end_longitude, early_leave_reason } = req.body;
 
-    const { rows } = await pool.query(
-      `SELECT * FROM work_logs WHERE id = $1 AND user_id = $2`,
+    const { rows } = await client.query(
+      `SELECT * FROM work_logs WHERE id = $1 AND user_id = $2 FOR UPDATE`,
       [id, userId]
     );
     const log = rows[0];
     if (!log) {
+      await client.query("ROLLBACK");
       return res.status(404).json({ error: { message: "Log tidak ditemukan", status: 404 } });
     }
     if (log.status !== "active") {
+      await client.query("ROLLBACK");
       return res.status(409).json({ error: { message: "Shift sudah selesai atau tidak aktif", status: 409 } });
     }
 
     if (log.geofence_passed === true) {
       if (end_latitude === undefined || end_longitude === undefined) {
+        await client.query("ROLLBACK");
         return res.status(400).json({
           error: { message: "Latitude dan longitude wajib karena geofence aktif saat shift dimulai", status: 400 },
         });
       }
     }
 
-    // Check for early leave
+    // Check for early leave (handles cross-midnight shifts)
     let isEarlyLeave = false;
     if (log.scheduled_end) {
-      const schedEndDate = timeToTodayDate(log.scheduled_end);
+      const { schedEnd } = getScheduledDateTimes(log.date, log.scheduled_start, log.scheduled_end);
       const now = new Date();
-      if (now < schedEndDate) {
+      if (schedEnd && now < schedEnd) {
         isEarlyLeave = true;
         if (!early_leave_reason || !early_leave_reason.trim()) {
+          await client.query("ROLLBACK");
           return res.status(400).json({
             error: { message: "Alasan pulang cepat wajib diisi", status: 400 },
           });
@@ -166,16 +218,16 @@ const finishShift = async (req, res, next) => {
     let totalMinutes;
 
     if (log.scheduled_start && !log.is_late) {
-      // On time: count from scheduled start
-      const schedStartDate = timeToTodayDate(log.scheduled_start);
-      totalMinutes = calculateMinutes(schedStartDate, endTime);
+      // On time: count from scheduled start (anchored to log's date)
+      const { schedStart } = getScheduledDateTimes(log.date, log.scheduled_start, log.scheduled_end);
+      totalMinutes = calculateMinutes(schedStart, endTime);
     } else {
       // Late or No schedule: count from actual start
       const startTime = new Date(log.start_time);
       totalMinutes = calculateMinutes(startTime, endTime);
     }
 
-    const updated = await pool.query(
+    const updated = await client.query(
       `UPDATE work_logs
        SET end_time = NOW(), description = $1, status = 'completed', total_work_minutes = $2,
            end_lat = $3, end_lng = $4, is_early_leave = $5, early_leave_reason = $6, updated_at = NOW()
@@ -186,9 +238,13 @@ const finishShift = async (req, res, next) => {
        isEarlyLeave, isEarlyLeave ? early_leave_reason.trim() : null, id]
     );
 
+    await client.query("COMMIT");
     res.json({ success: true, data: updated.rows[0] });
   } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
     next(err);
+  } finally {
+    client.release();
   }
 };
 
@@ -220,16 +276,39 @@ const getLogs = async (req, res, next) => {
       });
     }
 
-    const { rows } = await pool.query(
-      `SELECT id, date, start_time, end_time, total_work_minutes, description, status, geofence_passed,
-              scheduled_start, scheduled_end, is_late, late_reason, is_early_leave, early_leave_reason
-       FROM work_logs
-       WHERE user_id = $1 AND EXTRACT(MONTH FROM date) = $2 AND EXTRACT(YEAR FROM date) = $3
-       ORDER BY date DESC`,
-      [userId, Number(month), Number(year)]
-    );
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 31)); // default ~1 month
+    const offset = (page - 1) * limit;
 
-    res.json({ success: true, data: rows });
+    const [logsResult, countResult] = await Promise.all([
+      pool.query(
+        `SELECT id, date, start_time, end_time, total_work_minutes, description, status, geofence_passed,
+                scheduled_start, scheduled_end, is_late, late_reason, is_early_leave, early_leave_reason
+         FROM work_logs
+         WHERE user_id = $1 AND EXTRACT(MONTH FROM date) = $2 AND EXTRACT(YEAR FROM date) = $3
+         ORDER BY date DESC
+         LIMIT $4 OFFSET $5`,
+        [userId, Number(month), Number(year), limit, offset]
+      ),
+      pool.query(
+        `SELECT COUNT(*) AS total FROM work_logs
+         WHERE user_id = $1 AND EXTRACT(MONTH FROM date) = $2 AND EXTRACT(YEAR FROM date) = $3`,
+        [userId, Number(month), Number(year)]
+      ),
+    ]);
+
+    const total = Number(countResult.rows[0].total);
+
+    res.json({
+      success: true,
+      data: logsResult.rows,
+      pagination: {
+        page,
+        limit,
+        total,
+        total_pages: Math.ceil(total / limit),
+      },
+    });
   } catch (err) {
     next(err);
   }
@@ -245,13 +324,18 @@ const getLogSummary = async (req, res, next) => {
       });
     }
 
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 31));
+    const offset = (page - 1) * limit;
+
     const logsResult = await pool.query(
       `SELECT id, date, start_time, end_time, total_work_minutes, description, status, geofence_passed,
               scheduled_start, scheduled_end, is_late, late_reason, is_early_leave, early_leave_reason
        FROM work_logs
        WHERE user_id = $1 AND EXTRACT(MONTH FROM date) = $2 AND EXTRACT(YEAR FROM date) = $3
-       ORDER BY date DESC`,
-      [userId, Number(month), Number(year)]
+       ORDER BY date DESC
+       LIMIT $4 OFFSET $5`,
+      [userId, Number(month), Number(year), limit, offset]
     );
 
     const summaryResult = await pool.query(
@@ -267,6 +351,14 @@ const getLogSummary = async (req, res, next) => {
     const totalWorkMinutes = Number(summaryResult.rows[0].total_work_minutes);
     const averageHoursPerDay = totalDays > 0 ? Number((totalWorkMinutes / 60 / totalDays).toFixed(2)) : 0;
 
+    const countResult = await pool.query(
+      `SELECT COUNT(*) AS total FROM work_logs
+       WHERE user_id = $1 AND EXTRACT(MONTH FROM date) = $2 AND EXTRACT(YEAR FROM date) = $3`,
+      [userId, Number(month), Number(year)]
+    );
+
+    const total = Number(countResult.rows[0].total);
+
     res.json({
       success: true,
       data: {
@@ -277,6 +369,12 @@ const getLogSummary = async (req, res, next) => {
         total_late: Number(summaryResult.rows[0].total_late),
         total_early_leave: Number(summaryResult.rows[0].total_early_leave),
         logs: logsResult.rows,
+        pagination: {
+          page,
+          limit,
+          total,
+          total_pages: Math.ceil(total / limit),
+        },
       },
     });
   } catch (err) {
@@ -328,6 +426,10 @@ const getAllLogs = async (req, res, next) => {
       });
     }
 
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 50));
+    const offset = (page - 1) * limit;
+
     const conditions = ["EXTRACT(MONTH FROM date) = $1", "EXTRACT(YEAR FROM date) = $2"];
     const values = [Number(month), Number(year)];
 
@@ -340,14 +442,36 @@ const getAllLogs = async (req, res, next) => {
       conditions.push(`status = $${values.length}`);
     }
 
-    const query = `SELECT id, user_id, date, start_time, end_time, total_work_minutes, description, status, geofence_passed,
-                          scheduled_start, scheduled_end, is_late, late_reason, is_early_leave, early_leave_reason
-                   FROM work_logs
-                   WHERE ${conditions.join(" AND ")}
-                   ORDER BY date DESC, start_time DESC`;
+    const whereClause = conditions.join(" AND ");
 
-    const { rows } = await pool.query(query, values);
-    res.json({ success: true, data: rows });
+    const [logsResult, countResult] = await Promise.all([
+      pool.query(
+        `SELECT id, user_id, date, start_time, end_time, total_work_minutes, description, status, geofence_passed,
+                scheduled_start, scheduled_end, is_late, late_reason, is_early_leave, early_leave_reason
+         FROM work_logs
+         WHERE ${whereClause}
+         ORDER BY date DESC, start_time DESC
+         LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+        [...values, limit, offset]
+      ),
+      pool.query(
+        `SELECT COUNT(*) AS total FROM work_logs WHERE ${whereClause}`,
+        values
+      ),
+    ]);
+
+    const total = Number(countResult.rows[0].total);
+
+    res.json({
+      success: true,
+      data: logsResult.rows,
+      pagination: {
+        page,
+        limit,
+        total,
+        total_pages: Math.ceil(total / limit),
+      },
+    });
   } catch (err) {
     next(err);
   }
@@ -395,9 +519,8 @@ const adminUpdateLog = async (req, res, next) => {
       let totalWorkMinutes = log.total_work_minutes;
       // Recalculate: if scheduled_start exists, use it
       if (log.scheduled_start && !log.is_late) {
-        const schedStart = timeToTodayDate(log.scheduled_start);
-        // Adjust schedStart to the log's date
-        schedStart.setFullYear(mergedEnd.getFullYear(), mergedEnd.getMonth(), mergedEnd.getDate());
+        // Use log's actual date + scheduled_start time (handles cross-midnight shifts)
+        const { schedStart } = getScheduledDateTimes(log.date, log.scheduled_start, log.scheduled_end);
         totalWorkMinutes = calculateMinutes(schedStart, mergedEnd);
       } else {
         totalWorkMinutes = calculateMinutes(mergedStart, mergedEnd);
@@ -491,7 +614,7 @@ const deleteLogEntry = async (req, res, next) => {
     const { entryId } = req.params;
 
     const { rows: entries } = await pool.query(
-      `SELECT e.id, l.user_id 
+      `SELECT e.id, l.user_id, l.status
        FROM work_log_entries e
        JOIN work_logs l ON e.work_log_id = l.id
        WHERE e.id = $1`,
@@ -502,9 +625,14 @@ const deleteLogEntry = async (req, res, next) => {
       return res.status(404).json({ error: { message: "Catatan tidak ditemukan", status: 404 } });
     }
 
-    const logOwnerId = entries[0].user_id;
-    if (req.user.role !== "admin" && req.user.id !== logOwnerId) {
+    const entry = entries[0];
+    if (req.user.role !== "admin" && req.user.id !== entry.user_id) {
       return res.status(403).json({ error: { message: "Akses ditolak", status: 403 } });
+    }
+
+    // Non-admin users can only delete entries from active (in-progress) logs
+    if (req.user.role !== "admin" && entry.status !== "active") {
+      return res.status(403).json({ error: { message: "Tidak dapat menghapus catatan dari shift yang sudah selesai", status: 403 } });
     }
 
     await pool.query(`DELETE FROM work_log_entries WHERE id = $1`, [entryId]);

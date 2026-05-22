@@ -3,11 +3,34 @@ const pool = require("../config/db");
 
 const getAllUsers = async (req, res, next) => {
   try {
-    const { rows } = await pool.query(
-      `SELECT id, username, full_name, role, position, department, email, phone_number, avatar_url, is_active, created_at, updated_at
-       FROM users ORDER BY created_at DESC`
-    );
-    res.json({ success: true, data: rows });
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const offset = (page - 1) * limit;
+
+    // Get paginated users + total count in parallel
+    const [usersResult, countResult] = await Promise.all([
+      pool.query(
+        `SELECT id, username, full_name, role, position, department, email, phone_number, avatar_url, is_active, created_at, updated_at
+         FROM users
+         ORDER BY created_at DESC
+         LIMIT $1 OFFSET $2`,
+        [limit, offset]
+      ),
+      pool.query(`SELECT COUNT(*) AS total FROM users`),
+    ]);
+
+    const total = Number(countResult.rows[0].total);
+
+    res.json({
+      success: true,
+      data: usersResult.rows,
+      pagination: {
+        page,
+        limit,
+        total,
+        total_pages: Math.ceil(total / limit),
+      },
+    });
   } catch (err) {
     next(err);
   }
