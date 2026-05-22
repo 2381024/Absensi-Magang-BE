@@ -21,18 +21,20 @@ const pool = new Pool({
   min: POOL_MIN,
   idleTimeoutMillis: POOL_IDLE_TIMEOUT_MS,
   connectionTimeoutMillis: POOL_CONNECTION_TIMEOUT_MS,
-  // Abort any query that takes longer than STATEMENT_TIMEOUT_MS (prevents runaway queries)
-  query_timeout: STATEMENT_TIMEOUT_MS,
 });
 
-// Ensure every connection uses the correct timezone
+// Ensure every connection uses the correct timezone and query timeout
 pool.on("connect", (client) => {
   const tz = process.env.APP_TIMEZONE || "Asia/Jakarta";
   // PostgreSQL SET does not support parameterized queries; validate the timezone
   // string against a strict regex to prevent injection since APP_TIMEZONE is
   // an environment variable (not end-user input).
   const safeTz = /^[a-zA-Z0-9_\/+-]+$/.test(tz) ? tz : "Asia/Jakarta";
+  // Set timezone and statement timeout per connection.
+  // statement_timeout aborts any query that takes longer than STATEMENT_TIMEOUT_MS,
+  // preventing runaway queries from blocking the pool.
   client.query(`SET timezone = '${safeTz}'`);
+  client.query(`SET statement_timeout = '${STATEMENT_TIMEOUT_MS}'`);
 });
 
 // Log pool errors instead of crashing the process

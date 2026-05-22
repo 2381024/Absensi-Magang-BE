@@ -6,7 +6,7 @@ const getStats = async (req, res, next) => {
     const { rows } = await pool.query(`
       WITH
         today_logs AS (
-          SELECT status, is_late, is_early_leave, total_work_minutes
+          SELECT user_id, status, is_late, is_early_leave, total_work_minutes
           FROM work_logs
           WHERE date = CURRENT_DATE
         ),
