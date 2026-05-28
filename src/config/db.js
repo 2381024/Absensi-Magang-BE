@@ -33,8 +33,8 @@ pool.on("connect", (client) => {
   // Set timezone and statement timeout per connection.
   // statement_timeout aborts any query that takes longer than STATEMENT_TIMEOUT_MS,
   // preventing runaway queries from blocking the pool.
-  client.query(`SET timezone = '${safeTz}'`);
-  client.query(`SET statement_timeout = '${STATEMENT_TIMEOUT_MS}'`);
+  client.query(`SET timezone = '${safeTz}'`).catch(err => console.error("Error setting timezone:", err.message));
+  client.query(`SET statement_timeout = '${STATEMENT_TIMEOUT_MS}'`).catch(err => console.error("Error setting statement timeout:", err.message));
 });
 
 // Log pool errors instead of crashing the process
