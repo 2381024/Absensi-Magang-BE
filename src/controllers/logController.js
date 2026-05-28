@@ -58,17 +58,28 @@ const getScheduledDateTimes = (logDate, scheduledStart, scheduledEnd) => {
 };
 
 const startShift = async (req, res, next) => {
+  const dayOfWeek = getTodayDayOfWeek();
+
   try {
     const userId = req.user.id;
     const { latitude, longitude, late_reason } = req.body;
 
-    const todayLog = await pool.query(
-      `SELECT id, status, date FROM work_logs
-       WHERE user_id = $1 AND (status = 'active' OR date = CURRENT_DATE)
-       ORDER BY status ASC
-       LIMIT 1`,
-      [userId]
-    );
+    // Run independent queries concurrently
+    const [todayLog, scheduleResult, geofenceResult] = await Promise.all([
+      pool.query(
+        `SELECT id, status, date FROM work_logs
+         WHERE user_id = $1 AND (status = 'active' OR date = CURRENT_DATE)
+         ORDER BY status ASC
+         LIMIT 1`,
+        [userId]
+      ),
+      pool.query(
+        `SELECT start_time, end_time FROM user_schedules WHERE user_id = $1 AND day_of_week = $2`,
+        [userId, dayOfWeek]
+      ),
+      pool.query(`SELECT id, latitude, longitude, radius_meters FROM geofence_locations WHERE is_active = true`)
+    ]);
+
     if (todayLog.rows.length > 0) {
       const existing = todayLog.rows[0];
       const message = existing.status === 'active'
@@ -79,12 +90,6 @@ const startShift = async (req, res, next) => {
       });
     }
 
-    // Look up today's schedule
-    const dayOfWeek = getTodayDayOfWeek();
-    const scheduleResult = await pool.query(
-      `SELECT start_time, end_time FROM user_schedules WHERE user_id = $1 AND day_of_week = $2`,
-      [userId, dayOfWeek]
-    );
     const schedule = scheduleResult.rows[0] || null;
 
     let scheduledStart = null;
@@ -110,8 +115,6 @@ const startShift = async (req, res, next) => {
     }
 
     // Geofence check
-    const geofenceResult = await pool.query(
-      `SELECT id, latitude, longitude, radius_meters FROM geofence_locations WHERE is_active = true`);
     let geofencePassed = null;
     let startLat = null;
     let startLng = null;
@@ -446,11 +449,13 @@ const getAllLogs = async (req, res, next) => {
 
     const [logsResult, countResult] = await Promise.all([
       pool.query(
-        `SELECT id, user_id, date, start_time, end_time, total_work_minutes, description, status, geofence_passed,
-                scheduled_start, scheduled_end, is_late, late_reason, is_early_leave, early_leave_reason
-         FROM work_logs
+        `SELECT wl.id, wl.user_id, wl.date, wl.start_time, wl.end_time, wl.total_work_minutes, wl.description, wl.status, wl.geofence_passed,
+                wl.scheduled_start, wl.scheduled_end, wl.is_late, wl.late_reason, wl.is_early_leave, wl.early_leave_reason,
+                json_build_object('id', u.id, 'full_name', u.full_name) AS user
+         FROM work_logs wl
+         JOIN users u ON u.id = wl.user_id
          WHERE ${whereClause}
-         ORDER BY date DESC, start_time DESC
+         ORDER BY wl.date DESC, wl.start_time DESC
          LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
         [...values, limit, offset]
       ),
