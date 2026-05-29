@@ -515,6 +515,31 @@ const adminUpdateLog = async (req, res, next) => {
     const mergedStart = start_time ? new Date(start_time) : new Date(log.start_time);
     const mergedEnd = end_time !== undefined ? (end_time ? new Date(end_time) : null) : (log.end_time ? new Date(log.end_time) : null);
 
+    // Re-evaluate is_late when start_time changes
+    let effectiveIsLate = log.is_late;
+    let effectiveLateReason = log.late_reason;
+    if (start_time !== undefined && log.scheduled_start) {
+      const { schedStart } = getScheduledDateTimes(log.date, log.scheduled_start, log.scheduled_end);
+      if (schedStart) {
+        const newStart = new Date(start_time);
+        if (newStart <= schedStart) {
+          effectiveIsLate = false;
+          effectiveLateReason = null;
+        } else {
+          effectiveIsLate = true;
+        }
+      }
+    }
+
+    if (effectiveIsLate !== log.is_late) {
+      values.push(effectiveIsLate);
+      fields.push(`is_late = $${values.length}`);
+    }
+    if (effectiveLateReason !== log.late_reason) {
+      values.push(effectiveLateReason);
+      fields.push(`late_reason = $${values.length}`);
+    }
+
     if (end_time === null) {
       fields.push(`status = 'active'`);
       fields.push(`total_work_minutes = NULL`);
@@ -522,9 +547,7 @@ const adminUpdateLog = async (req, res, next) => {
       fields.push(`early_leave_reason = NULL`);
     } else if (mergedEnd) {
       let totalWorkMinutes = log.total_work_minutes;
-      // Recalculate: if scheduled_start exists, use it
-      if (log.scheduled_start && !log.is_late) {
-        // Use log's actual date + scheduled_start time (handles cross-midnight shifts)
+      if (log.scheduled_start && !effectiveIsLate) {
         const { schedStart } = getScheduledDateTimes(log.date, log.scheduled_start, log.scheduled_end);
         totalWorkMinutes = calculateMinutes(schedStart, mergedEnd);
       } else {
