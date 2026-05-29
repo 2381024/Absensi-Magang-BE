@@ -3,15 +3,63 @@ const pool = require("../config/db");
 // Admin: get all schedules grouped by user
 const getAllSchedules = async (req, res, next) => {
   try {
-    const { rows } = await pool.query(
-      `SELECT us.id, us.user_id, us.day_of_week, us.start_time, us.end_time,
-              u.full_name, u.email
-       FROM user_schedules us
-       JOIN users u ON u.id = us.user_id
-       WHERE u.is_active = true
-       ORDER BY u.full_name, us.day_of_week`
-    );
-    res.json({ success: true, data: rows });
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 10));
+    const offset = (page - 1) * limit;
+
+    let searchFilter = '';
+    let queryParams = [limit, offset];
+    let countParams = [];
+
+    if (req.query.search) {
+      searchFilter = ` AND (full_name ILIKE $3 OR email ILIKE $3) `;
+      queryParams.push(`%${req.query.search}%`);
+      countParams.push(`%${req.query.search}%`);
+    }
+
+    const [usersResult, countResult] = await Promise.all([
+      pool.query(
+        `SELECT id, full_name, email FROM users
+         WHERE is_active = true ${searchFilter}
+         ORDER BY full_name
+         LIMIT $1 OFFSET $2`,
+        queryParams
+      ),
+      pool.query(
+        `SELECT COUNT(*) AS total FROM users WHERE is_active = true ${searchFilter}`,
+        countParams
+      )
+    ]);
+
+    const userIds = usersResult.rows.map(u => u.id);
+    let schedules = [];
+
+    if (userIds.length > 0) {
+      const { rows } = await pool.query(
+        `SELECT us.id, us.user_id, us.day_of_week, us.start_time, us.end_time,
+                u.full_name, u.email
+         FROM user_schedules us
+         JOIN users u ON u.id = us.user_id
+         WHERE us.user_id = ANY($1)
+         ORDER BY u.full_name, us.day_of_week`,
+        [userIds]
+      );
+      schedules = rows;
+    }
+
+    const total = Number(countResult.rows[0].total);
+
+    res.json({
+      success: true,
+      data: schedules,
+      users: usersResult.rows,
+      pagination: {
+        page,
+        limit,
+        total,
+        total_pages: Math.ceil(total / limit),
+      },
+    });
   } catch (err) {
     next(err);
   }

@@ -1,5 +1,4 @@
 const pool = require("../config/db");
-const { getDistanceMeters } = require("../utils/haversine");
 
 const calculateMinutes = (start, end) => {
   const diff = Math.max(0, end.getTime() - start.getTime());
@@ -65,7 +64,7 @@ const startShift = async (req, res, next) => {
     const { latitude, longitude, late_reason } = req.body;
 
     // Run independent queries concurrently
-    const [todayLog, scheduleResult, geofenceResult] = await Promise.all([
+    const [todayLog, scheduleResult, geofenceActiveResult] = await Promise.all([
       pool.query(
         `SELECT id, status, date FROM work_logs
          WHERE user_id = $1 AND (status = 'active' OR date = CURRENT_DATE)
@@ -77,7 +76,7 @@ const startShift = async (req, res, next) => {
         `SELECT start_time, end_time FROM user_schedules WHERE user_id = $1 AND day_of_week = $2`,
         [userId, dayOfWeek]
       ),
-      pool.query(`SELECT id, latitude, longitude, radius_meters FROM geofence_locations WHERE is_active = true`)
+      pool.query(`SELECT 1 FROM geofence_locations WHERE is_active = true LIMIT 1`)
     ]);
 
     if (todayLog.rows.length > 0) {
@@ -119,24 +118,29 @@ const startShift = async (req, res, next) => {
     let startLat = null;
     let startLng = null;
 
-    if (geofenceResult.rows.length > 0) {
+    if (geofenceActiveResult.rows.length > 0) {
       if (latitude === undefined || longitude === undefined) {
         return res.status(400).json({
           error: { message: "Latitude dan longitude wajib ketika geofence aktif", status: 400 },
         });
       }
 
-      const isInside = geofenceResult.rows.some((location) => {
-        const distance = getDistanceMeters(
-          Number(latitude),
-          Number(longitude),
-          Number(location.latitude),
-          Number(location.longitude)
-        );
-        return distance <= Number(location.radius_meters);
-      });
+      const { rows: insideRows } = await pool.query(
+        `SELECT id FROM geofence_locations
+         WHERE is_active = true AND (
+           6371000 * acos(
+             least(1.0, greatest(-1.0,
+               cos(radians($1)) * cos(radians(latitude)) *
+               cos(radians(longitude) - radians($2)) +
+               sin(radians($1)) * sin(radians(latitude))
+             ))
+           )
+         ) <= radius_meters
+         LIMIT 1`,
+        [Number(latitude), Number(longitude)]
+      );
 
-      if (!isInside) {
+      if (insideRows.length === 0) {
         return res.status(403).json({
           error: { message: "Lokasi Anda berada di luar area geofence aktif", status: 403 },
         });

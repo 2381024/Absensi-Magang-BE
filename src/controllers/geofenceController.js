@@ -1,13 +1,34 @@
-﻿const pool = require("../config/db");
+const pool = require("../config/db");
 
 const getGeofences = async (req, res, next) => {
   try {
-    const { rows } = await pool.query(
-      `SELECT id, name, latitude, longitude, radius_meters, is_active, created_by, created_at, updated_at
-       FROM geofence_locations
-       ORDER BY created_at DESC`
-    );
-    res.json({ success: true, data: rows });
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 10));
+    const offset = (page - 1) * limit;
+
+    const [geofencesResult, countResult] = await Promise.all([
+      pool.query(
+        `SELECT id, name, latitude, longitude, radius_meters, is_active, created_by, created_at, updated_at
+         FROM geofence_locations
+         ORDER BY created_at DESC
+         LIMIT $1 OFFSET $2`,
+         [limit, offset]
+      ),
+      pool.query(`SELECT COUNT(*) AS total FROM geofence_locations`)
+    ]);
+
+    const total = Number(countResult.rows[0].total);
+
+    res.json({
+      success: true,
+      data: geofencesResult.rows,
+      pagination: {
+        page,
+        limit,
+        total,
+        total_pages: Math.ceil(total / limit),
+      },
+    });
   } catch (err) {
     next(err);
   }
