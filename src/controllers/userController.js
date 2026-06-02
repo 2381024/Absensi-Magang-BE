@@ -165,15 +165,36 @@ const updateUser = async (req, res, next) => {
 const deleteUser = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { rows, rowCount } = await pool.query(
-      `UPDATE users SET is_active = false, updated_at = NOW() WHERE id = $1 RETURNING id`,
-      [id]
-    );
-    if (rowCount === 0) {
-      return res.status(404).json({ error: { message: "User tidak ditemukan", status: 404 } });
+
+    if (req.user.id === id) {
+      return res.status(403).json({
+        error: { message: "Tidak dapat menghapus akun sendiri", status: 403 },
+      });
     }
-    res.json({ success: true, data: { id } });
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        "UPDATE geofence_locations SET created_by = NULL WHERE created_by = $1",
+        [id]
+      );
+      const { rowCount } = await client.query("DELETE FROM users WHERE id = $1", [id]);
+      await client.query("COMMIT");
+
+      if (rowCount === 0) {
+        return res.status(404).json({ error: { message: "User tidak ditemukan", status: 404 } });
+      }
+
+      res.json({ success: true, data: { id } });
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
   } catch (err) {
+    console.error("Delete user error:", err);
     next(err);
   }
 };
