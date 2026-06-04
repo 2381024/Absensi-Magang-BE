@@ -20,6 +20,9 @@ const logRoutes = require("./src/routes/logRoutes");
 const dashboardRoutes = require("./src/routes/dashboardRoutes");
 const configRoutes = require("./src/routes/configRoutes");
 const scheduleRoutes = require("./src/routes/scheduleRoutes");
+const rekapRoutes = require("./src/routes/rekapRoutes");
+const leaveRoutes = require("./src/routes/leaveRoutes");
+const holidayRoutes = require("./src/routes/holidayRoutes");
 const errorHandler = require("./src/middleware/errorHandler");
 
 const app = express();
@@ -66,6 +69,9 @@ app.use("/api/logs", logRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/config", configRoutes);
 app.use("/api/schedules", scheduleRoutes);
+app.use("/api/rekap", rekapRoutes);
+app.use("/api/leaves", leaveRoutes);
+app.use("/api/holidays", holidayRoutes);
 app.use("/api/health", healthRoutes);
 
 // Error handler

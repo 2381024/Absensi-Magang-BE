@@ -30,7 +30,8 @@ const getStats = async (req, res, next) => {
            AND id IN (SELECT user_id FROM scheduled_users_today)
         ) AS users_on_leave_today,
         (SELECT COUNT(*) FROM today_logs WHERE is_late = true) AS late_today,
-        (SELECT COUNT(*) FROM today_logs WHERE is_early_leave = true) AS early_leave_today
+        (SELECT COUNT(*) FROM today_logs WHERE is_early_leave = true) AS early_leave_today,
+        (SELECT COUNT(*) FROM leave_requests WHERE status = 'pending') AS pending_leaves
     `);
 
     const stats = rows[0];
@@ -47,6 +48,7 @@ const getStats = async (req, res, next) => {
         users_on_leave_today: Number(stats.users_on_leave_today || 0),
         late_today: Number(stats.late_today || 0),
         early_leave_today: Number(stats.early_leave_today || 0),
+        pending_leaves: Number(stats.pending_leaves || 0),
       },
     });
   } catch (err) {
