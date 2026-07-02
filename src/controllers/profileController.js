@@ -60,6 +60,13 @@ const updateProfile = async (req, res, next) => {
     }
 
     if (new_password !== undefined) {
+      if (!current_password) {
+        return res.status(400).json({ error: { message: "Password lama wajib diisi untuk mengganti password", status: 400 } });
+      }
+      const isMatch = await bcrypt.compare(current_password, user.password_hash);
+      if (!isMatch) {
+        return res.status(401).json({ error: { message: "Password lama tidak sesuai", status: 401 } });
+      }
       const passwordHash = await bcrypt.hash(new_password, 10);
       values.push(passwordHash);
       updates.push(`password_hash = $${values.length}`);

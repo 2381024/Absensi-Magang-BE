@@ -8,11 +8,13 @@ const getAllSchedules = async (req, res, next) => {
     const offset = (page - 1) * limit;
 
     let searchFilter = '';
+    let searchFilterCount = '';
     let queryParams = [limit, offset];
     let countParams = [];
 
     if (req.query.search) {
       searchFilter = ` AND (full_name ILIKE $3 OR email ILIKE $3) `;
+      searchFilterCount = ` AND (full_name ILIKE $1 OR email ILIKE $1) `;
       queryParams.push(`%${req.query.search}%`);
       countParams.push(`%${req.query.search}%`);
     }
@@ -26,7 +28,7 @@ const getAllSchedules = async (req, res, next) => {
         queryParams
       ),
       pool.query(
-        `SELECT COUNT(*) AS total FROM users WHERE is_active = true ${searchFilter}`,
+        `SELECT COUNT(*) AS total FROM users WHERE is_active = true ${searchFilterCount || searchFilter}`,
         countParams
       )
     ]);

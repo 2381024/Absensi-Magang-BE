@@ -222,17 +222,8 @@ const finishShift = async (req, res, next) => {
 
     // Calculate total work minutes
     const endTime = new Date();
-    let totalMinutes;
-
-    if (log.scheduled_start && !log.is_late) {
-      // On time: count from scheduled start (anchored to log's date)
-      const { schedStart } = getScheduledDateTimes(log.date, log.scheduled_start, log.scheduled_end);
-      totalMinutes = calculateMinutes(schedStart, endTime);
-    } else {
-      // Late or No schedule: count from actual start
-      const startTime = new Date(log.start_time);
-      totalMinutes = calculateMinutes(startTime, endTime);
-    }
+    const startTime = new Date(log.start_time);
+    const totalMinutes = calculateMinutes(startTime, endTime);
 
     const updated = await client.query(
       `UPDATE work_logs
@@ -324,45 +315,71 @@ const getLogs = async (req, res, next) => {
 const getLogSummary = async (req, res, next) => {
   try {
     const userId = req.user.id;
-    const { month, year } = req.query;
-    if (!month || !year) {
+    let { month, year } = req.query;
+    if (!year) {
       return res.status(400).json({
-        error: { message: "Query parameter month dan year wajib", status: 400 },
+        error: { message: "Query parameter year wajib", status: 400 },
       });
     }
 
+    const isAllMonths = !month || Number(month) === 0;
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 31));
+    const limit = Math.min(366, Math.max(1, parseInt(req.query.limit, 10) || (isAllMonths ? 366 : 31)));
     const offset = (page - 1) * limit;
 
-    const logsResult = await pool.query(
-      `SELECT id, date, start_time, end_time, total_work_minutes, description, status, geofence_passed,
-              scheduled_start, scheduled_end, is_late, late_reason, is_early_leave, early_leave_reason
-       FROM work_logs
-       WHERE user_id = $1 AND EXTRACT(MONTH FROM date) = $2 AND EXTRACT(YEAR FROM date) = $3
-       ORDER BY date DESC
-       LIMIT $4 OFFSET $5`,
-      [userId, Number(month), Number(year), limit, offset]
-    );
+    let logsQuery, logsParams;
+    if (isAllMonths) {
+      logsQuery = `SELECT id, date, start_time, end_time, total_work_minutes, description, status, geofence_passed,
+                          scheduled_start, scheduled_end, is_late, late_reason, is_early_leave, early_leave_reason
+                   FROM work_logs
+                   WHERE user_id = $1 AND EXTRACT(YEAR FROM date) = $2
+                   ORDER BY date DESC
+                   LIMIT $3 OFFSET $4`;
+      logsParams = [userId, Number(year), limit, offset];
+    } else {
+      logsQuery = `SELECT id, date, start_time, end_time, total_work_minutes, description, status, geofence_passed,
+                          scheduled_start, scheduled_end, is_late, late_reason, is_early_leave, early_leave_reason
+                   FROM work_logs
+                   WHERE user_id = $1 AND EXTRACT(MONTH FROM date) = $2 AND EXTRACT(YEAR FROM date) = $3
+                   ORDER BY date DESC
+                   LIMIT $4 OFFSET $5`;
+      logsParams = [userId, Number(month), Number(year), limit, offset];
+    }
+    const logsResult = await pool.query(logsQuery, logsParams);
 
-    const summaryResult = await pool.query(
-      `SELECT COUNT(*) AS total_days, COALESCE(SUM(total_work_minutes), 0) AS total_work_minutes,
-              COUNT(*) FILTER (WHERE is_late = true) AS total_late,
-              COUNT(*) FILTER (WHERE is_early_leave = true) AS total_early_leave
-       FROM work_logs
-       WHERE user_id = $1 AND EXTRACT(MONTH FROM date) = $2 AND EXTRACT(YEAR FROM date) = $3`,
-      [userId, Number(month), Number(year)]
-    );
+    let summaryQuery, summaryParams;
+    if (isAllMonths) {
+      summaryQuery = `SELECT COUNT(*) AS total_days, COALESCE(SUM(total_work_minutes), 0) AS total_work_minutes,
+                             COUNT(*) FILTER (WHERE is_late = true) AS total_late,
+                             COUNT(*) FILTER (WHERE is_early_leave = true) AS total_early_leave
+                      FROM work_logs
+                      WHERE user_id = $1 AND EXTRACT(YEAR FROM date) = $2`;
+      summaryParams = [userId, Number(year)];
+    } else {
+      summaryQuery = `SELECT COUNT(*) AS total_days, COALESCE(SUM(total_work_minutes), 0) AS total_work_minutes,
+                             COUNT(*) FILTER (WHERE is_late = true) AS total_late,
+                             COUNT(*) FILTER (WHERE is_early_leave = true) AS total_early_leave
+                      FROM work_logs
+                      WHERE user_id = $1 AND EXTRACT(MONTH FROM date) = $2 AND EXTRACT(YEAR FROM date) = $3`;
+      summaryParams = [userId, Number(month), Number(year)];
+    }
+    const summaryResult = await pool.query(summaryQuery, summaryParams);
 
     const totalDays = Number(summaryResult.rows[0].total_days);
     const totalWorkMinutes = Number(summaryResult.rows[0].total_work_minutes);
     const averageHoursPerDay = totalDays > 0 ? Number((totalWorkMinutes / 60 / totalDays).toFixed(2)) : 0;
 
-    const countResult = await pool.query(
-      `SELECT COUNT(*) AS total FROM work_logs
-       WHERE user_id = $1 AND EXTRACT(MONTH FROM date) = $2 AND EXTRACT(YEAR FROM date) = $3`,
-      [userId, Number(month), Number(year)]
-    );
+    let countQuery, countParams;
+    if (isAllMonths) {
+      countQuery = `SELECT COUNT(*) AS total FROM work_logs
+                    WHERE user_id = $1 AND EXTRACT(YEAR FROM date) = $2`;
+      countParams = [userId, Number(year)];
+    } else {
+      countQuery = `SELECT COUNT(*) AS total FROM work_logs
+                    WHERE user_id = $1 AND EXTRACT(MONTH FROM date) = $2 AND EXTRACT(YEAR FROM date) = $3`;
+      countParams = [userId, Number(month), Number(year)];
+    }
+    const countResult = await pool.query(countQuery, countParams);
 
     const total = Number(countResult.rows[0].total);
 
@@ -427,9 +444,9 @@ const getLogById = async (req, res, next) => {
 const getAllLogs = async (req, res, next) => {
   try {
     const { user_id, month, year, status } = req.query;
-    if (!month || !year) {
+    if (!year) {
       return res.status(400).json({
-        error: { message: "Query parameter month dan year wajib", status: 400 },
+        error: { message: "Query parameter year wajib", status: 400 },
       });
     }
 
@@ -437,8 +454,15 @@ const getAllLogs = async (req, res, next) => {
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 50));
     const offset = (page - 1) * limit;
 
-    const conditions = ["EXTRACT(MONTH FROM date) = $1", "EXTRACT(YEAR FROM date) = $2"];
-    const values = [Number(month), Number(year)];
+    const isAllMonths = !month || Number(month) === 0;
+    let conditions, values;
+    if (isAllMonths) {
+      conditions = ["EXTRACT(YEAR FROM date) = $1"];
+      values = [Number(year)];
+    } else {
+      conditions = ["EXTRACT(MONTH FROM date) = $1", "EXTRACT(YEAR FROM date) = $2"];
+      values = [Number(month), Number(year)];
+    }
 
     if (user_id) {
       values.push(user_id);
@@ -455,7 +479,8 @@ const getAllLogs = async (req, res, next) => {
       pool.query(
         `SELECT wl.id, wl.user_id, wl.date, wl.start_time, wl.end_time, wl.total_work_minutes, wl.description, wl.status, wl.geofence_passed,
                 wl.scheduled_start, wl.scheduled_end, wl.is_late, wl.late_reason, wl.is_early_leave, wl.early_leave_reason,
-                json_build_object('id', u.id, 'full_name', u.full_name) AS user
+                json_build_object('id', u.id, 'full_name', u.full_name) AS user,
+                (SELECT string_agg(content, ' | ' ORDER BY timestamp) FROM work_log_entries WHERE work_log_id = wl.id) AS entries
          FROM work_logs wl
          JOIN users u ON u.id = wl.user_id
          WHERE ${whereClause}
@@ -550,13 +575,7 @@ const adminUpdateLog = async (req, res, next) => {
       fields.push(`is_early_leave = NULL`);
       fields.push(`early_leave_reason = NULL`);
     } else if (mergedEnd) {
-      let totalWorkMinutes = log.total_work_minutes;
-      if (log.scheduled_start && !effectiveIsLate) {
-        const { schedStart } = getScheduledDateTimes(log.date, log.scheduled_start, log.scheduled_end);
-        totalWorkMinutes = calculateMinutes(schedStart, mergedEnd);
-      } else {
-        totalWorkMinutes = calculateMinutes(mergedStart, mergedEnd);
-      }
+      const totalWorkMinutes = calculateMinutes(mergedStart, mergedEnd);
       values.push(totalWorkMinutes);
       fields.push(`total_work_minutes = $${values.length}`);
       fields.push(`status = 'completed'`);
@@ -675,6 +694,43 @@ const deleteLogEntry = async (req, res, next) => {
   }
 };
 
+const bulkRecalculateLogs = async (req, res, next) => {
+  try {
+    const { user_id, date_from, date_to } = req.body;
+
+    const conditions = ["status = 'completed'", "end_time IS NOT NULL"];
+    const values = [];
+
+    if (user_id) {
+      values.push(user_id);
+      conditions.push(`user_id = $${values.length}`);
+    }
+    if (date_from) {
+      values.push(date_from);
+      conditions.push(`date >= $${values.length}`);
+    }
+    if (date_to) {
+      values.push(date_to);
+      conditions.push(`date <= $${values.length}`);
+    }
+
+    const whereClause = conditions.join(" AND ");
+
+    const result = await pool.query(
+      `UPDATE work_logs
+       SET total_work_minutes = ROUND(EXTRACT(EPOCH FROM (end_time - start_time)) / 60),
+           updated_at = NOW()
+       WHERE ${whereClause}
+       RETURNING id`,
+      values
+    );
+
+    res.json({ success: true, data: { updated_count: result.rowCount } });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   startShift,
   finishShift,
@@ -688,4 +744,5 @@ module.exports = {
   addLogEntry,
   getLogEntries,
   deleteLogEntry,
+  bulkRecalculateLogs,
 };

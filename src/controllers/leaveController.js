@@ -110,7 +110,7 @@ const approveLeave = async (req, res, next) => {
   try {
     const adminId = req.user.id;
     const { id } = req.params;
-    const { reviewer_notes } = req.body;
+    const { reviewer_notes } = req.body || {};
 
     const { rows } = await pool.query(
       `UPDATE leave_requests
@@ -134,7 +134,7 @@ const rejectLeave = async (req, res, next) => {
   try {
     const adminId = req.user.id;
     const { id } = req.params;
-    const { reviewer_notes } = req.body;
+    const { reviewer_notes } = req.body || {};
 
     if (!reviewer_notes) {
       return res.status(400).json({ error: { message: "reviewer_notes wajib untuk menolak", status: 400 } });

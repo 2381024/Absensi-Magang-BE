@@ -48,7 +48,7 @@ app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 // Rate limiter for login endpoint
 const loginLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
-  max: 5, // 5 attempts per minute
+  max: 20, // 20 attempts per minute
   message: {
     error: {
       message: "Terlalu banyak percobaan login. Coba lagi dalam 1 menit.",
