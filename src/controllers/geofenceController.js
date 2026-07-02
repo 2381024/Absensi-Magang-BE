@@ -8,9 +8,15 @@ const getGeofences = async (req, res, next) => {
 
     const [geofencesResult, countResult] = await Promise.all([
       pool.query(
-        `SELECT id, name, latitude, longitude, radius_meters, is_active, created_by, created_at, updated_at
-         FROM geofence_locations
-         ORDER BY created_at DESC
+        `SELECT g.id, g.name, g.latitude, g.longitude, g.radius_meters, g.is_active, g.created_by, g.created_at, g.updated_at,
+                COALESCE(c.cnt, 0)::int AS assigned_user_count
+         FROM geofence_locations g
+         LEFT JOIN (
+           SELECT geofence_id, COUNT(*) AS cnt
+           FROM user_geofence_assignments
+           GROUP BY geofence_id
+         ) c ON c.geofence_id = g.id
+         ORDER BY g.created_at DESC
          LIMIT $1 OFFSET $2`,
          [limit, offset]
       ),
@@ -27,6 +33,40 @@ const getGeofences = async (req, res, next) => {
         limit,
         total,
         total_pages: Math.ceil(total / limit),
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+const getGeofenceById = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const geoResult = await pool.query(
+      `SELECT id, name, latitude, longitude, radius_meters, is_active, created_by, created_at, updated_at
+       FROM geofence_locations WHERE id = $1`,
+      [id]
+    );
+    if (geoResult.rows.length === 0) {
+      return res.status(404).json({ error: { message: "Geofence tidak ditemukan", status: 404 } });
+    }
+
+    const usersResult = await pool.query(
+      `SELECT u.id, u.full_name, u.username, u.email, u.avatar_url, u.role, u.is_active,
+              a.assigned_at
+       FROM user_geofence_assignments a
+       JOIN users u ON u.id = a.user_id
+       WHERE a.geofence_id = $1
+       ORDER BY a.assigned_at DESC`,
+      [id]
+    );
+
+    res.json({
+      success: true,
+      data: {
+        ...geoResult.rows[0],
+        assigned_users: usersResult.rows,
       },
     });
   } catch (err) {
@@ -143,6 +183,7 @@ const toggleGeofence = async (req, res, next) => {
 
 module.exports = {
   getGeofences,
+  getGeofenceById,
   createGeofence,
   updateGeofence,
   deleteGeofence,

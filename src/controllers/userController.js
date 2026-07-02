@@ -7,7 +7,6 @@ const getAllUsers = async (req, res, next) => {
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
     const offset = (page - 1) * limit;
 
-    // Get paginated users + total count in parallel
     const [usersResult, countResult] = await Promise.all([
       pool.query(
         `SELECT id, username, full_name, role, position, department, email, phone_number, avatar_url, is_active, created_at, updated_at
@@ -20,10 +19,30 @@ const getAllUsers = async (req, res, next) => {
     ]);
 
     const total = Number(countResult.rows[0].total);
+    const users = usersResult.rows;
+
+    if (users.length > 0) {
+      const ids = users.map((u) => u.id);
+      const placeholders = ids.map((_, i) => `$${i + 1}`).join(",");
+      const assignmentsResult = await pool.query(
+        `SELECT user_id, geofence_id FROM user_geofence_assignments WHERE user_id IN (${placeholders})`,
+        ids
+      );
+      const byUser = new Map();
+      for (const row of assignmentsResult.rows) {
+        if (!byUser.has(row.user_id)) byUser.set(row.user_id, []);
+        byUser.get(row.user_id).push(row.geofence_id);
+      }
+      for (const u of users) {
+        u.assigned_geofence_ids = byUser.get(u.id) || [];
+      }
+    } else {
+      for (const u of users) u.assigned_geofence_ids = [];
+    }
 
     res.json({
       success: true,
-      data: usersResult.rows,
+      data: users,
       pagination: {
         page,
         limit,
@@ -49,7 +68,14 @@ const getUserById = async (req, res, next) => {
       return res.status(404).json({ error: { message: "User tidak ditemukan", status: 404 } });
     }
 
-    res.json({ success: true, data: rows[0] });
+    const user = rows[0];
+    const assignmentsResult = await pool.query(
+      `SELECT geofence_id FROM user_geofence_assignments WHERE user_id = $1`,
+      [id]
+    );
+    user.assigned_geofence_ids = assignmentsResult.rows.map((r) => r.geofence_id);
+
+    res.json({ success: true, data: user });
   } catch (err) {
     next(err);
   }

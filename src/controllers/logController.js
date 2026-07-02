@@ -63,8 +63,7 @@ const startShift = async (req, res, next) => {
     const userId = req.user.id;
     const { latitude, longitude, late_reason } = req.body;
 
-    // Run independent queries concurrently
-    const [todayLog, scheduleResult, geofenceActiveResult] = await Promise.all([
+    const [todayLog, scheduleResult, assignedGeofencesResult] = await Promise.all([
       pool.query(
         `SELECT id, status, date FROM work_logs
          WHERE user_id = $1 AND (status = 'active' OR date = CURRENT_DATE)
@@ -76,7 +75,13 @@ const startShift = async (req, res, next) => {
         `SELECT start_time, end_time FROM user_schedules WHERE user_id = $1 AND day_of_week = $2`,
         [userId, dayOfWeek]
       ),
-      pool.query(`SELECT 1 FROM geofence_locations WHERE is_active = true LIMIT 1`)
+      pool.query(
+        `SELECT g.id, g.latitude, g.longitude, g.radius_meters
+         FROM geofence_locations g
+         JOIN user_geofence_assignments a ON a.geofence_id = g.id
+         WHERE a.user_id = $1 AND g.is_active = true`,
+        [userId]
+      )
     ]);
 
     if (todayLog.rows.length > 0) {
@@ -104,7 +109,6 @@ const startShift = async (req, res, next) => {
 
       if (now > schedStartDate) {
         isLate = true;
-        // Require late reason
         if (!late_reason || !late_reason.trim()) {
           return res.status(400).json({
             error: { message: "Alasan terlambat wajib diisi", status: 400 },
@@ -113,56 +117,71 @@ const startShift = async (req, res, next) => {
       }
     }
 
-    // Geofence check
+    const assignedGeofences = assignedGeofencesResult.rows;
+
     let geofencePassed = null;
     let startLat = null;
     let startLng = null;
+    let matchedGeofenceId = null;
 
-    if (geofenceActiveResult.rows.length > 0) {
-      if (latitude === undefined || longitude === undefined) {
-        return res.status(400).json({
-          error: { message: "Latitude dan longitude wajib ketika geofence aktif", status: 400 },
-        });
-      }
-
-      const { rows: insideRows } = await pool.query(
-        `SELECT id FROM geofence_locations
-         WHERE is_active = true AND (
-           6371000 * acos(
-             least(1.0, greatest(-1.0,
-               cos(radians($1)) * cos(radians(latitude)) *
-               cos(radians(longitude) - radians($2)) +
-               sin(radians($1)) * sin(radians(latitude))
-             ))
-           )
-         ) <= radius_meters
-         LIMIT 1`,
-        [Number(latitude), Number(longitude)]
-      );
-
-      if (insideRows.length === 0) {
-        return res.status(403).json({
-          error: { message: "Lokasi Anda berada di luar area geofence aktif", status: 403 },
-        });
-      }
-
-      geofencePassed = true;
-      startLat = latitude;
-      startLng = longitude;
+    if (assignedGeofences.length === 0) {
+      return res.status(403).json({
+        error: {
+          message: "Anda belum ditugaskan ke lokasi kerja manapun. Hubungi admin untuk penugasan.",
+          status: 403,
+        },
+      });
     }
+
+    if (latitude === undefined || longitude === undefined) {
+      return res.status(400).json({
+        error: { message: "Latitude dan longitude wajib karena Anda memiliki lokasi penugasan", status: 400 },
+      });
+    }
+
+    const lat = Number(latitude);
+    const lng = Number(longitude);
+
+    let matchedGeo = null;
+    for (const geo of assignedGeofences) {
+      const distance = 6371000 * Math.acos(
+        Math.min(1.0, Math.max(-1.0,
+          Math.cos(lat * Math.PI / 180) * Math.cos(Number(geo.latitude) * Math.PI / 180) *
+          Math.cos(Number(geo.longitude) * Math.PI / 180 - lng * Math.PI / 180) +
+          Math.sin(lat * Math.PI / 180) * Math.sin(Number(geo.latitude) * Math.PI / 180)
+        ))
+      );
+      if (distance <= Number(geo.radius_meters)) {
+        matchedGeo = geo;
+        break;
+      }
+    }
+
+    if (!matchedGeo) {
+      return res.status(403).json({
+        error: {
+          message: "Lokasi Anda berada di luar lokasi kerja yang ditugaskan",
+          status: 403,
+        },
+      });
+    }
+
+    geofencePassed = true;
+    startLat = latitude;
+    startLng = longitude;
+    matchedGeofenceId = matchedGeo.id;
 
     const { rows } = await pool.query(
       `INSERT INTO work_logs (user_id, date, start_time, geofence_passed, start_lat, start_lng,
-                              scheduled_start, scheduled_end, is_late, late_reason)
-       VALUES ($1, CURRENT_DATE, NOW(), $2, $3, $4, $5, $6, $7, $8)
-       RETURNING id, date, start_time, status, geofence_passed, scheduled_start, scheduled_end, is_late, late_reason`,
+                              scheduled_start, scheduled_end, is_late, late_reason, matched_geofence_id)
+       VALUES ($1, CURRENT_DATE, NOW(), $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id, date, start_time, status, geofence_passed, scheduled_start, scheduled_end, is_late, late_reason, matched_geofence_id`,
       [userId, geofencePassed, startLat, startLng,
-       scheduledStart, scheduledEnd, isLate, isLate ? late_reason.trim() : null]
+       scheduledStart, scheduledEnd, isLate, isLate ? late_reason.trim() : null, matchedGeofenceId]
     );
 
     res.status(201).json({ success: true, data: rows[0] });
   } catch (err) {
-    // Handle UNIQUE constraint violation from concurrent start requests
     if (err.code === "23505") {
       return res.status(409).json({
         error: { message: "Shift hari ini sudah ada", status: 409 },
